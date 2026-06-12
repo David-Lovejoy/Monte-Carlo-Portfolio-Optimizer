@@ -1,0 +1,722 @@
+<!DOCTYPE html>
+<html>
+    <head>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    </head>
+    <body>
+        <button id = "optimizer_power" onclick = "display_optimizer()">show optimizer</button>
+        <div id = "input field">
+        Starting Principal: <input id = "principle"/> <br/>
+        Goal: <input id = "goal"/><br/>
+        Time Horizon: <input id = "Time"/>
+        Starting Interest Rate: <input id = "RFR"/> <br/>
+            <div id = "i_type_1">standard stock (SPY) <input id = "SPY"/> <input type="range" id="slider" min="1" max="3" value="1"></div>
+            <div id = "i_type_2">Treasuries <input id = "T"/></div>
+            <div id = "i_type_3">Gold <input id = "G"/></div>
+            <div id = "i_type_4">Internationals <input id = "I"/></div>
+            <div id = "i_type_5">REIT (real estate) <input id = "R"/></div>
+            <button id = "simulate portfolio" onclick = "run()"> Run </button>
+        </div>
+        <div id = "optimizer" style = "display:none;">
+            Starting Principal: <input id = "principle_o"/> <br/>
+            Time Horizon: <input id = "Time_0" oninput = "generate_crn()"/> <br/>
+            <button id = "toggle" onclick = "change_optimizer_mode()">Goal Attainment Mode</button>
+            <div id = "goal_entries">Goal: <input id = "goal_o"/><br/></div>
+            <div id = "risk_entries" style="display:none;"> 
+                Max probability of ruin:<input id = "max_ruin_tolerance"/><br/>
+                Ruin threshold: <input id = "ruin_threshold"/>
+            </div>
+            <button onclick = "optimize()">Optimize</button>
+        </div>
+        <div id = "return_field">
+
+        </div>
+        <br/>
+        <div id = "return_field2"> <!-- helpful in testing certain features and comparing different algs, not NECESSARY for the project -->
+
+        </div>
+        <div id = "return_field3"> <!-- helpful in testing certain features and comparing different algs, not NECESSARY for the project -->
+
+        </div>
+        <canvas id="histogramChart" width="400" height="200"></canvas>
+        <span>Log returns:</span>
+        <canvas id="histogramChart2" width="400" height="200"></canvas>
+        % change of hitting goal: <div id = "prob_of_goal"></div>
+        <script>
+            let e = 2.718 //Keep Eulers number as a global var
+            RFR = 4 //keep RFR at 4%
+            var show_optimizer = 0;
+            var optimizer_mode = 1 //mode of the optimizer tool
+            let chart; //global
+            function createHistogram(data, bins = 20, ReturnsLogged) {
+                let min = Math.min(...data);
+                let max = Math.max(...data);
+                let binSize = (max - min) / bins;
+
+                let counts = new Array(bins).fill(0);
+
+                for (let i = 0; i < data.length; i++) {
+                    let index = Math.floor((data[i] - min) / binSize);
+                    if (index === bins) index--; // edge case
+                        counts[index]++;
+                    }
+
+                let labels = [];
+                for (let i = 0; i < bins; i++) {
+                    let start = min + i * binSize;
+                    let end = start + binSize;
+                    //in the normalized histogram we still want real labels, so we gotta  start = e^start and end = e ^ end for that one
+                    
+                    if (ReturnsLogged === true) {
+                        start = e ** start
+                        end = e ** end
+                    }
+                        labels.push(`${start.toFixed(0)}-${end.toFixed(0)}`);
+                }
+
+                return { labels, counts };
+            }
+            function drawChart(results) {
+                if (chart) {
+                    chart.destroy();
+                }
+
+                let hist = createHistogram(results, 20, true);
+                let ctx = document.getElementById("histogramChart2").getContext("2d");
+
+                chart = new Chart(ctx, {
+                    type: "bar",
+                    data: {
+                        labels: hist.labels,
+                        datasets: [{
+                            label: "Portfolio Outcomes",
+                            data: hist.counts
+                        }]
+                    }
+                });
+            }
+            function sum(results) {
+                var sum = 0;
+                for (var i = 0; i < results.length; i++) {
+                    sum = sum + results[i]
+                }
+                return sum;
+            }
+            function magnitude(results) {
+                var sum = 0;
+                for (var i = 0; i < results.length; i++) {
+                    sum = sum + (results[i] ** 2)
+                }
+                return Math.sqrt(sum);
+            }
+            function normalize(results) {     //normalize array 'resuls', / each element by sum(results) ** 2
+                var mag = magnitude(results);
+                var out = []
+                for (var i = 0; i < results.length; i++) {
+                    if (mag > 0) {
+                        out.push(results[i] / mag)
+                    } else {
+                        out.push(0)
+                    }
+                }
+                return out
+            }
+            function mean(results) {
+                var mean = results.reduce((sum, x) => sum + x, 0) / results.length;
+                return mean
+            }
+            function zero_sum_vector(n) {
+                let out = [];
+                let sum = 0;
+
+                for (let i = 0; i < n; i++) {
+                    let v = (Math.random() * 12) - 6;
+                    out.push(v);
+                    sum += v;
+                }
+
+                let mean = sum / n;
+
+                for (let i = 0; i < n; i++) {
+                    out[i] -= mean;
+                }
+
+                return out;
+            }
+
+            function double_zero_sum(vector) {
+                toReturn = []
+                for (i = 0; i < vector.length; i++) {
+                    toReturn.push( vector[i] * 1.2 ) 
+                }
+                return vector
+            }
+            function check_shift_constraints(stock_percent, bond_percent, gold_percent, i_percent, r_percent, shift) { //ensure applying shift + and - still hold 0 < asset_percent < 100 
+                if (stock_percent + shift[0] > 100 || stock_percent - shift[0] < 0 || stock_percent + shift[0] < 0 || stock_percent - shift[0] > 100) {
+                    return false
+                }
+                if (bond_percent + shift[1] > 100 || bond_percent - shift[1] < 0 || bond_percent + shift[1] < 0 || bond_percent - shift[1] > 100) {
+                    return false
+                }
+                if (gold_percent + shift[2] > 100 || gold_percent - shift[2] < 0 || gold_percent + shift[2] < 0 || gold_percent - shift[2] > 100) {
+                    return false
+                }
+                if (i_percent + shift[3] > 100 || i_percent - shift[3] < 0 || i_percent + shift[3] < 0 || i_percent - shift[3] > 100) {
+                    return false
+                }
+                if (r_percent + shift[4] > 100 || r_percent - shift[4] < 0 || r_percent + shift[4] < 0 || r_percent - shift[4] > 100) {
+                    return false
+                }
+                return true // if none of these conditionals hit, shift is OK
+
+            }
+            function std(results) {
+                const m = mean(results);
+
+                const variance = results.reduce((sum, x) => sum + (x - m) ** 2, 0) / results.length;
+                return Math.sqrt(variance);
+            }
+            function cholesky(A) {
+                const n = A.length;
+                const L = Array.from({length: n}, () => new Array(n).fill(0));
+    
+                for (let i = 0; i < n; i++) {
+                     for (let j = 0; j <= i; j++) {
+                        let sum = 0;
+                        for (let k = 0; k < j; k++) {
+                             sum += L[i][k] * L[j][k];
+                        }
+                        if (i === j) {
+                            L[i][j] = Math.sqrt(A[i][i] - sum);
+                        } else {
+                            L[i][j] = (A[i][j] - sum) / L[j][j];
+                        }
+                    }
+                }
+                return L;
+            }
+            function randomNormal(mean = 0, std = 1) { //SUPER USEFUL, NORMAL DIST RANDOM # GENERATOR GIVEN MEAN AND STD
+                let u1 = Math.random();
+                let u2 = Math.random();
+                let z0 = Math.sqrt(-2.0 * Math.log(u1)) * Math.cos(2.0 * Math.PI * u2);
+                return z0 * std + mean;
+            }
+
+            function arithmetic_to_log(l) {
+                const safeLog = (x) => {
+                if (x <= 0) throw new Error("Log undefined for non-positive values");
+                    return Math.log(x);
+                };
+                if (Array.isArray(l)) {
+                    return l.map(safeLog);
+                }
+                if (typeof l === "number") {
+                    return safeLog(l);
+                }
+                throw new Error("Invalid input type");
+            }
+            function log_to_arithmetic(x) {
+                const safeExp = (v) => {
+                    if (typeof v !== "number" || !Number.isFinite(v)) {
+                        throw new Error("Input must be a finite number");
+                    }
+                    return Math.exp(v);
+                };
+                if (Array.isArray(x)) {
+                    return x.map(safeExp);
+                }
+                if (typeof x === "number") {
+                    return safeExp(x);
+                }
+                throw new Error("Invalid input type: must be number or array of numbers");
+            }
+            var crn_matrix = [] //the crn_matrix is a global variable
+            function generate_crn_matrices(n, a) { //n = # of i=time intervals, a = # of assets
+                crn_matrix = []
+                //generate 1000 universes, id'd 0 to 999
+                for (universe = 0; universe < 1000; universe++) {
+                    crn_matrix.push([])
+                    for (i = 0; i < a; i++) {
+                        crn_matrix[universe].push([])
+                        for (j = 0; j < n; j++) {
+                            crn_matrix[universe][i].push(randomNormal(0, 1))
+                        }
+                    }
+                }
+            }
+
+            function generate_crn() {
+                generate_crn_matrices(parseInt(document.getElementById("Time_0").value), 5);
+            }
+
+            function seeded_random(mode, crn_universe_id, a = 0, i = 0) { //a = asset, i = iteration
+                if (mode === true) {
+                    return crn_matrix[crn_universe_id][a][i] 
+                }
+                return randomNormal(0, 1)
+            }
+
+
+            // a single iteration in a single monte carlo
+            function monte_carlo_single(time, stock_percent, bond_percent, gold_percent, i_percent, r_percent, principle, RFR, real_or_nominal, crn_mode, crn_universe_id = 0) {
+                                    // --- STOCKS (log-normal model) ---
+                //var portfolioFactor = stock_percent * (e ** (randomNormal(0.07 - 0.5 * 0.15 * 0.15, 0.15))) + bond_percent * (e ** Math.log(1.04));
+                let stock_mean = 0.07 - (0.5 * 0.15 * 0.15)
+                let stock_std = 0.15
+                let bond_mean = 0.04 - (0.5 * 0.05 * 0.05)
+                let bond_std = 0.05
+                let gold_mean = 0.042 - (0.5 * 0.17 * 0.17)
+                let gold_std = 0.17
+                let i_mean = 0.058 - (0.5 * 0.17 * 0.17)
+                let i_std = 0.17
+                let r_mean = 0.074 - (0.5 * 0.2 * 0.2)
+                let r_std = 0.2
+                var inflation = 0.02;
+
+                var stock_percent = stock_percent / 100
+                var bond_percent = bond_percent / 100
+                var gold_percent = gold_percent / 100
+                var i_percent = i_percent / 100
+                var r_percent = r_percent / 100
+
+                const Cov = [
+                //  SPY    Bond   Gold   Intl   REIT
+                [ 1.00, -0.20,  0.05,  0.72,  0.62],  // SPY
+                [-0.20,  1.00,  0.15, -0.10,  0.15],  // Bond
+                [ 0.05,  0.15,  1.00,  0.05,  0.05],  // Gold
+                [ 0.72, -0.10,  0.05,  1.00,  0.55],  // Intl
+                [ 0.62,  0.15,  0.05,  0.55,  1.00]   // REIT
+                ];
+                var L = cholesky(Cov) //L*Lt = Cov
+                var z_raw = [
+                    seeded_random(crn_mode, crn_universe_id, 0, i),
+                    seeded_random(crn_mode, crn_universe_id, 1, i),
+                    seeded_random(crn_mode, crn_universe_id, 2, i),
+                    seeded_random(crn_mode, crn_universe_id, 3, i),
+                    seeded_random(crn_mode, crn_universe_id, 4, i)
+                ] //Z vector, independent random shocks
+
+                //Z_cholesky = L*z_raw, Cov(Z_chokesly) = Cov...
+                var z_corr = L.map(row => row.reduce((sum, val, k) => sum + val * z_raw[k], 0))
+                //Z_corr are independent random vars that have Covariance of above Cov. Matrix
+                stock_change = stock_mean + stock_std * z_corr[0]
+                bond_change  = bond_mean  + bond_std  * z_corr[1]
+                gold_change  = gold_mean  + gold_std  * z_corr[2]
+                i_change     = i_mean     + i_std     * z_corr[3]
+                r_change     = r_mean     + r_std     * z_corr[4]
+
+                var log_gain_stock = 0
+                var log_gain_bond = 0
+                var log_gain_gold = 0
+                var log_gain_i = 0
+                var log_gain_r = 0
+                for (var i = 0; i < time; i++) {
+
+                    var z1 = seeded_random(crn_mode, crn_universe_id, 0, i)
+                    var z2 = seeded_random(crn_mode, crn_universe_id, 1, i)
+                    var z3 = seeded_random(crn_mode, crn_universe_id, 2, i)
+                    var z4 = seeded_random(crn_mode, crn_universe_id, 3, i)
+                    var z5 = seeded_random(crn_mode, crn_universe_id, 4, i)
+
+                    log_gain_stock += stock_change
+                    log_gain_bond += bond_change
+                    log_gain_gold += gold_change 
+                    log_gain_i += i_change
+                    log_gain_r += r_change
+
+                    // --- inflation adjustment --- IF user wants
+                    if (real_or_nominal === true) {
+                        var inflationFactor = Math.log(1 - inflation);
+                        log_gain_stock += inflationFactor;
+                        log_gain_bond += inflationFactor;
+                    }
+
+                }
+                principle *= stock_percent  * Math.exp(log_gain_stock)
+                + bond_percent   * Math.exp(log_gain_bond)
+                + gold_percent   * Math.exp(log_gain_gold)
+                + i_percent      * Math.exp(log_gain_i)
+                + r_percent      * Math.exp(log_gain_r)
+
+                return principle; //total portfolio value in ARETHMETIC SPACE
+            }
+
+            //an entire monte carlo sim, with n iterations
+            function monte_carlo_portfolio(real_or_nominal, time, stock_percent, bond_percent, gold_percent, i_percent, r_percent, principle, RFR, goal, crn_mode) { //n = # of iterations, real_or_nominal -> does user want return to be real inflation adjusted $ values, or nominal
+                outcomes = []
+                goalCount = 0
+                for (var i = 0; i < 1000; i++) {
+                    var outcome = monte_carlo_single(time, stock_percent, bond_percent, gold_percent, i_percent, r_percent, principle, RFR, real_or_nominal, crn_mode, i) //we must tell monte carlo single WHICH CRN univere to use, that is i
+                        outcomes.push(outcome)
+                        if (outcome >= goal) {
+                            goalCount++
+                        }
+                }
+                //results contains n monte-carlo outcomes, return mean, std.... 
+                var toReturn = {full_list: outcomes, avg: mean(outcomes), std: std(outcomes), goal_count: goalCount}
+                return toReturn //when using CRN, we ONLY care about the average and std of outcomes...
+            }
+
+
+            function run() {
+                console.log("Not_optimizer")
+                //part 1) pull variables into integers, catch the error if we have text
+                var principle = parseInt(document.getElementById("principle").value)
+                var time = parseInt(document.getElementById("Time").value)
+                var stock_percent = parseInt(document.getElementById("SPY").value)
+                var bond_percent = parseInt(document.getElementById("T").value)
+                var gold_percent = parseInt(document.getElementById("G").value)
+                var i_percent =  parseInt(document.getElementById("I").value)
+                var r_percent =  parseInt(document.getElementById("R").value)
+                //var RFR = parseInt(document.getElementById("RFR").value)
+                var goal = parseInt(document.getElementById("goal").value)
+                
+                if (isNaN(principle) && isNaN(time) && isNaN(stock_percent) && isNaN(bond_percent) && isNaN(gold_percent) && isNaN(i_percent) && isNaN(r_percent)) {
+                    alert("make sure all entries are NUMBERS")
+                }
+                if (stock_percent + bond_percent + gold_percent + i_percent + r_percent !== 100) {
+                    alert("make sure all entries add to 100%...")
+                }
+
+
+                //part 2) run the monte carlo sim
+                results = monte_carlo_portfolio(true, time, stock_percent, bond_percent, gold_percent, i_percent, r_percent, principle, RFR, goal, false) //crn_random is OFF
+                console.log("monte_carlo_portfolio returned: ", results)
+                document.getElementById("return_field").innerHTML = "<div id = total>" + results.avg + "</div>   <div id = variance>" + results.std + "</div>"
+
+                log_results = arithmetic_to_log(results.full_list)
+
+                drawChart(log_results)
+            }
+            
+
+            function display_optimizer() {
+                if (show_optimizer === 0) {
+                    show_optimizer = 1
+                    document.getElementById("optimizer").style.display = "block"
+                    document.getElementById("input field").style.display = "none"
+                    document.getElementById("optimizer_power").innerHTML = "hide optimizer"
+                } else {
+                    show_optimizer = 0
+                    document.getElementById("optimizer").style.display = "none"
+                    document.getElementById("input field").style.display = "block"
+                    document.getElementById("optimizer_power").innerHTML = "show optimizer"
+                }
+            }
+
+
+
+            function change_optimizer_mode() {
+                if (optimizer_mode === 1) {
+                    optimizer_mode = 2
+                    document.getElementById("toggle").innerHTML = "Risk Management Mode"
+                    document.getElementById("goal_entries").style.display = "none";
+                    document.getElementById("risk_entries").style.display = "block";
+                } else {
+                    optimizer_mode = 1
+                    document.getElementById("toggle").innerHTML = "Goal Attainment Mode"
+                    document.getElementById("goal_entries").style.display = "block";
+                    document.getElementById("risk_entries").style.display = "none";
+                }
+            }
+
+
+            function mode_1(principle, goal, time) {
+                console.log("mode_1")
+                // Max Probability of goal | principal and time
+                prob_outcomes = [] 
+                for (var stock_percent = 0; stock_percent <= 100; stock_percent++) { //grid search for now :(
+                    console.log("loop 1")
+                    var bond_percent = 100 - stock_percent
+                    results = monte_carlo_portfolio(true, time, stock_percent, bond_percent, 0, 0, 0, principle, RFR, goal, false)
+                    prob_outcomes.push(results.goal_count / 10)
+                }
+
+                //now, find max index of "probabity of outcome array, and return it
+                BestIndex = 0
+                for (s = 0; s < prob_outcomes.length; s++) {
+                    console.log("loop 2")
+                    if (prob_outcomes[s] > prob_outcomes[BestIndex]) {
+                        BestIndex = s
+                    }
+                }
+                document.getElementById("return_field").innerHTML = "grid search: best split is " + BestIndex + "% in stock, and " + (100 - BestIndex) + "% in bonds, with a " + prob_outcomes[BestIndex] + "% chance of reaching $" + goal + " in " + time + " years";
+            }
+            function mode_1_SPSA(principle, goal, time) {
+                console.log("mode_1_spsa")
+                // Max Probability of goal | principal and time
+                stock_percent = 50
+                bond_percent = 50
+                shift = zero_sum_vector(2) //2 because 2 assets right now
+                var result = 0;
+                var result2 = 1;
+                var result3 = 1;
+                var iter = 0; //stop this after 200 iterations to prevent infinite looping...
+                bestResult = {probability_of_goal: 0, stock_alloc: 0, bond_alloc: 0}
+                while (iter < 200) { //WE ARE LOOKING FOR A MAX, RESULT2 < RESULT > RESULT3, END
+                    console.log("Top of loop")
+                    result = monte_carlo_portfolio(true, time, stock_percent, bond_percent, 0, 0, 0, principle, RFR, goal, true).goal_count / 1000 * 100
+                    //set shift vector with norm of 1
+                    shift = zero_sum_vector(2) //2 because 2 assets right now
+                    result2 = monte_carlo_portfolio(true, time, stock_percent + shift[0], bond_percent + shift[1], 0, 0, 0, principle, RFR, goal, true)
+                    result3 = monte_carlo_portfolio(true, time, stock_percent - shift[0], bond_percent - shift[1], 0, 0, 0, principle, RFR, goal, true)
+                    //convert results into 'loss function'... loss = P(Goal)
+                    result2 = (result2.goal_count / 1000) * 100
+                    result3 = (result3.goal_count / 1000) * 100
+                    //IF RESULT 1, 2, AND 3 = eachother, -> when we get far from extrema results start to = eachother, and were not finding any gradient...
+                    if (result > 99) { //if were getting near certainty of goal, push towards bonds
+                        console.log("force push towards bonds")
+                        stock_percent -= 10
+                        bond_percent += 10
+                    }
+                    if (result < 3) { //if were never reaching goal, we need to push towards stock
+                        console.log("force push towards stocks")
+                        stock_percent += 10
+                        bond_percent -= 10
+                    }
+                    // maximize result
+                    if (result2 > result && result2 >= result3) {
+                       stock_percent += shift[0];
+                       bond_percent += shift[1];
+                    } else if (result3 > result) {
+                       stock_percent -= shift[0];
+                        bond_percent -= shift[1];
+                    }
+                    stock_percent = Math.max(0, stock_percent); //these 5 lines 'bind' stock/bond percent to +ve numbers between 0 and 100
+                    bond_percent = Math.max(0, bond_percent);
+                    let s = stock_percent + bond_percent;
+                    stock_percent = 100 * stock_percent / s;
+                    bond_percent = 100 * bond_percent / s;
+
+
+                    if (result > bestResult.probability_of_goal) { //track the BEST thing we've found over 200 iterations of search
+                        bestResult = {probability_of_goal: result, stock_alloc: stock_percent, bond_alloc: bond_percent}
+                    }
+                    iter++
+                    console.log(iter + ": ")
+                    console.log(result + " " + result2 + " " + " " + result3)
+                    console.log(stock_percent + "% stock and " + bond_percent + "% bond")
+                    console.log(shift)
+                }
+                document.getElementById("return_field2").innerHTML = "stochastic climber: best split is " + bestResult.stock_alloc + "% in stock, and " + bestResult.bond_alloc + "% in bonds, with a " + bestResult.probability_of_goal + "% chance of reaching $" + goal + " in " + time + " years";
+            }
+
+            function mode_1_SPSA5(principle, goal, time) {
+                console.log("mode_1_spsa 5 Assets")
+                // Max Probability of goal | principal and time
+                stock_percent = 20
+                bond_percent = 20
+                gold_percent = 20
+                i_percent = 20
+                r_percent = 20
+                var shrink_factor = 1
+                while (true) {
+                    shift = zero_sum_vector(5) //5 because 5 assets right now
+                    for (var i = 0; i < shift.length; i++) { //idea, SHRINK pertubation vector range as loop lives.. to stop loop from locking up if result is close to a boundary
+                        shift[i] *= shrink_factor
+                    }
+                    if (check_shift_constraints(stock_percent, bond_percent, gold_percent, i_percent, r_percent, shift)) {
+                        break
+                    } else {
+                        shrink_factor = shrink_factor * 0.9 //starts at 1, decays to 0 as loop iterates
+                    }
+                }
+
+                var result = 0;
+                var result2 = 1;
+                var result3 = 1;
+                var iter = 0; //stop this after 200 iterations to prevent infinite looping...
+                bestResult = {probability_of_goal: 0, stock_alloc: 0, bond_alloc: 0, gold_alloc: 0, i_alloc: 0, r_alloc: 0}
+                while (iter < 200) { //WE ARE LOOKING FOR A MAX, RESULT2 < RESULT > RESULT3, END
+                    console.log("current allocations: " +" "+ stock_percent +" "+ bond_percent +" "+ gold_percent +" "+ i_percent +" "+ r_percent)
+                    console.log("Top of loop")
+                    result = monte_carlo_portfolio(true, time, stock_percent, bond_percent, gold_percent, i_percent, r_percent, principle, RFR, goal, true)
+                    //set shift vector with norm of 1
+                    shrink_factor = 1
+                    while (true) {
+                    shift = zero_sum_vector(5) //5 because 5 assets right now
+                    for (var i = 0; i < shift.length; i++) { //idea, SHRINK pertubation vector range as loop lives.. to stop loop from locking up if result is close to a boundary
+                        shift[i] *= shrink_factor
+                    }
+                    if (check_shift_constraints(stock_percent, bond_percent, gold_percent, i_percent, r_percent, shift)) {
+                        break
+                    } else {
+                        shrink_factor = shrink_factor * 0.9 //starts at 1, decays to 0 as loop iterates
+                    }
+                }
+                    result2 = monte_carlo_portfolio(true, time, stock_percent + shift[0], bond_percent + shift[1], gold_percent + shift[2], i_percent + shift[3], r_percent + shift[4], principle, RFR, goal, true)
+                    result3 = monte_carlo_portfolio(true, time, stock_percent - shift[0], bond_percent - shift[1], gold_percent - shift[2], i_percent - shift[3], r_percent - shift[4], principle, RFR, goal, true)
+                    console.log("returned result object.goal count: " + result.goal_count +" "+ result2.goal_count +" "+ result3.goal_count)
+                    //convert results into 'loss function'... loss = P(Goal)
+                    result = (result.goal_count / 1000) * 100
+                    result2 = (result2.goal_count / 1000) * 100
+                    result3 = (result3.goal_count / 1000) * 100
+                    //IF RESULT 1, 2, AND 3 = eachother, -> when we get far from extrema results start to = eachother, and were not finding any gradient...
+                    console.log("result: ", result)
+                    var i = 0
+                    while (result < 3) { //if were never reaching goal and can't find gradient, we need to grow pertubation vector
+                        i++
+                        console.log("growing pertubation vector")
+                        console.log(stock_percent, bond_percent, gold_percent, i_percent, r_percent)
+                        shift = double_zero_sum(shift) //grow shift vector...
+                        result = monte_carlo_portfolio(true, time, stock_percent, bond_percent, gold_percent, i_percent, r_percent, principle, RFR, goal, true)
+                        result2 = monte_carlo_portfolio(true, time, stock_percent + shift[0], bond_percent + shift[1], gold_percent + shift[2], i_percent + shift[3], r_percent + shift[4], principle, RFR, goal, true)
+                        result3 = monte_carlo_portfolio(true, time, stock_percent - shift[0], bond_percent - shift[1], gold_percent - shift[2], i_percent + shift[3], r_percent + shift[4], principle, RFR, goal, true)
+                        //convert results into 'loss function'... loss = P(Goal)
+                        result = (result.goal_count / 1000) * 100
+                        result2 = (result2.goal_count / 1000) * 100
+                        result3 = (result3.goal_count / 1000) * 100
+                        console.log("results: " + result + " result2: " + result2 + "result3: " + result3)
+                        if (i > 1000) {
+                            console.log("breaking")
+                            break
+                        }
+                    }
+                    // maximize result
+                    if (result2 > result && result2 >= result3) {
+                       stock_percent += shift[0];
+                       bond_percent += shift[1];
+                       gold_percent += shift[2];
+                       i_percent += shift[3];
+                       r_percent += shift[4];
+
+                    } else if (result3 > result) {
+                        stock_percent -= shift[0];
+                        bond_percent -= shift[1];
+                        gold_percent -= shift[2];
+                       i_percent -= shift[3];
+                       r_percent -= shift[4];
+                    }
+                    
+
+                    if (result > bestResult.probability_of_goal) { //track the BEST thing we've found over 200 iterations of search
+                        bestResult = {probability_of_goal: result, stock_alloc: stock_percent, bond_alloc: bond_percent, gold_alloc: gold_percent, i_alloc: i_percent, r_alloc: r_percent}
+                    }
+                    iter++
+                    console.log(iter + ": ")
+                    console.log(result + " " + result2 + " " + " " + result3)
+                    console.log(stock_percent + "% stock and " + bond_percent + "% bond")
+                    console.log(shift)
+                }
+                document.getElementById("return_field3").innerHTML = "stochastic climber: best split is " + bestResult.stock_alloc + "% in stock, and " + bestResult.bond_alloc + "% in bonds, " + bestResult.gold_alloc + "% in gold, " +bestResult.i_alloc+ "% in internationals, and " +bestResult.r_alloc+ "% in REIT's with a " + bestResult.probability_of_goal + "% chance of reaching $" + goal + " in " + time + " years";
+            }
+
+            function mode_2(principle, time, max_ruin_tolerance, ruin_threshold) {
+                console.log("mode_2")
+                // Max EV | can't ruin      is_ruin()
+                // P(final value < threshold) ≤ risk tolerance
+                var portfolios = [] //each element [stock, bond, EV, ruin] it is given, every element in this list does not ruin
+                for (var stock_percent = 0; stock_percent <= 100; stock_percent++) {
+                    var bond_percent = 100 - stock_percent
+                    var results = monte_carlo_portfolio(true, time, stock_percent, bond_percent, 0, 0, 0, principle, RFR, ruin_threshold, false)
+                    portfolios.push({stock: stock_percent, bond: bond_percent, ev: results.avg , ruin_odds: (100 - (results.goal_count / 10))})
+                }
+
+
+
+                //now, find the BEST portfolio
+                bestSet = false
+                var bestPortfolio = {stock: 0, bond: 0, ev: -1, ruin_odds: 1}
+                for(var i = 0; i < portfolios.length; i++) {
+                    if (portfolios[i].ev > bestPortfolio.ev && portfolios[i].ruin_odds < max_ruin_tolerance) {
+                        bestPortfolio = portfolios[i]
+                        console.log("portfolio set as best:" + bestPortfolio)
+                        bestSet = true //makes sure portfolio sets off the default at least once....
+                    }
+                }
+                if (bestSet === true) {
+                    document.getElementById("return_field").innerHTML = bestPortfolio.stock + "% stock and " + bestPortfolio.bond + "% bonds gives EV of " + bestPortfolio.ev + " with odds of ending up under $" + ruin_threshold + " is only " + bestPortfolio.ruin_odds + "%";
+                } else {
+                    document.getElementById("return_field").innerHTML = "There is no allocation which satisfies a risk tolerance this low"
+                }
+            }
+
+
+            function mode_2_SPSA(principle, time, max_ruin_tolerance, ruin_threshold) { //LOSS FUNCTION TO MAXIMIZE:  
+                console.log("mode_1_spsa")
+                // Max portfolio EV where ruin_prob < max_ruin_tolerance 
+                stock_percent = 50
+                bond_percent = 50
+                shift = zero_sum_vector(2) //2 because 2 assets right now
+                var result = 0;
+                var result2 = 1;
+                var result3 = 1;
+                var iter = 0; //stop this after 200 iterations to prevent infinite looping...
+                bestResult = {loss: -10000000, ruin_odds: 0, avg: 0, stock_alloc: 0, bond_alloc: 0}
+                while (iter < 200) { //WE ARE LOOKING FOR A MAX, RESULT2 < RESULT > RESULT3, END
+                    console.log("Top of loop")
+                    result = monte_carlo_portfolio(true, time, stock_percent, bond_percent, 0, 0, 0, principle, RFR, ruin_threshold, true)
+                    var result_ruin = 100 - (result.goal_count / 1000 * 100)
+                    var result_ev = result.avg
+                    if ( 100 - (result.goal_count / 1000 * 100) < max_ruin_tolerance) { // if ruin probability is OK
+                        result = result.avg 
+                    } else { //if ruin probability is NOT OK
+                        result = result.avg - ((100 - (result.goal_count / 1000 * 100))*(10**6))
+                    }
+                    //set shift vector with norm of 1
+                    shift = zero_sum_vector(2) //2 because 2 assets right now
+                    result2 = monte_carlo_portfolio(true, time, stock_percent + shift[0], bond_percent + shift[1], 0, 0, 0, principle, RFR, ruin_threshold, true)
+                    result3 = monte_carlo_portfolio(true, time, stock_percent - shift[0], bond_percent - shift[1], 0, 0, 0, principle, RFR, ruin_threshold, true)
+                    //convert results into 'loss function'... loss = P(Goal)
+                    if ( 100 - (result2.goal_count / 1000 * 100) < max_ruin_tolerance) { // if ruin probability is OK
+                        result2 = result2.avg 
+                    } else { //if ruin probability is NOT OK
+                        result2 = result2.avg - ((100 - (result2.goal_count / 1000 * 100)) * (10**6))
+                    }
+                    if ( 100 - (result3.goal_count / 1000 * 100) < max_ruin_tolerance) { // if ruin probability is OK
+                        result3 = result3.avg 
+                    } else { //if ruin probability is NOT OK
+                        result3 = result3.avg - ((100 - (result3.goal_count / 1000 * 100))* (10**6))
+                    }
+                    //IF RESULT 1, 2, AND 3 = eachother, -> when we get far from extrema results start to = eachother, and were not finding any gradient...
+                   
+                    // maximize result
+                    if (result2 > result && result2 >= result3) {
+                       stock_percent += shift[0];
+                       bond_percent += shift[1];
+                    } else if (result3 > result) {
+                       stock_percent -= shift[0];
+                        bond_percent -= shift[1];
+                    }
+                    stock_percent = Math.max(0, stock_percent); //these 5 lines 'bind' stock/bond percent to +ve numbers between 0 and 100
+                    bond_percent = Math.max(0, bond_percent);
+                    let s = stock_percent + bond_percent;
+                    stock_percent = 100 * stock_percent / s;
+                    bond_percent = 100 * bond_percent / s;
+
+
+                    if (result > bestResult.loss) { //track the BEST thing we've found over 200 iterations of search
+                        bestResult = {loss: result, ruin_odds: result_ruin, avg: result_ev, stock_alloc: stock_percent, bond_alloc: bond_percent}
+                    }
+                    iter++
+                    console.log(iter + ": ")
+                    console.log(result + " " + result2 + " " + " " + result3)
+                    console.log(stock_percent + "% stock and " + bond_percent + "% bond")
+                    console.log("bestResult holding: " + bestResult.loss + " " + bestResult.stock_alloc + " " + bestResult.bond_alloc)
+                    console.log(shift)
+                }
+                document.getElementById("return_field2").innerHTML = "stochastic climber: best split is " + bestResult.stock_alloc + "% in stock, and " + bestResult.bond_alloc + "% in bonds, gives EV of " + bestResult.avg + " and a " + bestResult.ruin_odds + "% chance of not falling below $" + ruin_threshold + " in " + time + " years";
+            }
+            
+            function optimize() {
+                var principle = parseInt(document.getElementById("principle_o").value)
+                var goal = parseInt(document.getElementById("goal_o").value)
+                var time = parseInt(document.getElementById("Time_0").value)
+                var max_ruin_tolerance = parseInt(document.getElementById("max_ruin_tolerance").value)
+                var ruin_threshold = parseInt(document.getElementById("ruin_threshold").value)
+
+                if (optimizer_mode === 1) {
+                    mode_1(principle, goal, time)
+                    mode_1_SPSA(principle, goal, time)
+                    mode_1_SPSA5(principle, goal, time)
+                }
+                if (optimizer_mode === 2) {
+                    mode_2(principle, time, max_ruin_tolerance, ruin_threshold)
+                    mode_2_SPSA(principle, time, max_ruin_tolerance, ruin_threshold)
+                }
+                
+            }
+
+        </script>
+    </body>
+</html>
