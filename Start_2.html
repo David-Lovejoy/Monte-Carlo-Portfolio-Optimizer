@@ -4,6 +4,12 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     </head>
     <body>
+        <button onclick="test()">TEST</button>
+        <button onclick = "pull_market_data()">TEST PULL DATA</button>
+        <input type = number id = "start_date"/>
+        <input type = number id = "end_date"/>
+        <button onclick="set_time()">Set Time</button>
+        Time Frame:<div id = "timeframe"></div>
         <button id = "optimizer_power" onclick = "display_optimizer()">show optimizer</button>
         <div id = "input field">
         Starting Principal: <input id = "principle"/> <br/>
@@ -16,6 +22,8 @@
             <div id = "i_type_4">Internationals <input id = "I"/></div>
             <div id = "i_type_5">REIT (real estate) <input id = "R"/></div>
             <button id = "simulate portfolio" onclick = "run()"> Run </button>
+            <br/> <br/>
+            <button onclick = "save_portfolio()">Save</button><button onclick = "load_portfolio()">Load</button>
         </div>
         <div id = "optimizer" style = "display:none;">
             Starting Principal: <input id = "principle_o"/> <br/>
@@ -48,6 +56,143 @@
             var show_optimizer = 0;
             var optimizer_mode = 1 //mode of the optimizer tool
             let chart; //global
+
+            var stock_mean;
+            var stock_std;
+            var bond_mean;
+            var bond_std;
+            var gold_mean;
+            var gold_std;
+            var i_mean;
+            var i_std;
+            var r_mean;
+            var r_std;
+            var cov;
+            function valid_weights(w) {
+                if (!Array.isArray(w) || w.length !== 5) {
+                    return false
+                }
+                var sum = 0
+                for (var i = 0; i < 5; i++) {
+                    if (!Number.isInteger(w[i])) {
+                        return false
+                    }
+                    sum += w[i]
+                    if (w[i] < 0 || w[i] > 100) {
+                        return false
+                    }
+                }
+                if (sum !== 100) {
+                    return false
+                }
+                return true
+            }
+            async function save_portfolio() {
+                var n = prompt("please enter a name for this composition...")
+                if (!n || typeof(n) !== "string" || n.length === 0) {
+                    alert("You Must Enter a Name!")
+                    return
+                }
+                var w = [parseInt(document.getElementById("SPY").value), parseInt(document.getElementById("T").value), parseInt(document.getElementById("G").value), parseInt(document.getElementById("I").value), parseInt(document.getElementById("R").value)]
+                if (!valid_weights(w)) {
+                    alert("weights must all be between 0 and 100, and sum to 100 in order to save")
+                    return
+                }
+                const response = await fetch(`http://localhost:5001/api/savePortfolio`, {
+                method: "POST",
+                headers: {
+                   "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    name: n,
+                    weights: w
+                })
+                });
+            }
+
+            async function load_portfolio() {
+                var n = prompt("please enter the name of the portfolio you want to load: ")
+                if (!n || typeof(n) !== "string" || n.length === 0) {
+                    alert("You Must Enter a Name!")
+                    return
+                }
+                const response = await fetch(`http://localhost:5001/api/loadPortfolio/${encodeURIComponent(n)}`, {
+                    method: "GET",
+                });
+                const data = await response.json(); 
+                console.log("loaded portfolio: ")
+                console.log(data)
+                document.getElementById("SPY").value = data[0]
+                document.getElementById("T").value = data[1]
+                document.getElementById("G").value = data[2]
+                document.getElementById("I").value = data[3]
+                document.getElementById("R").value = data[4]
+            }
+
+            async function test() {
+            const response = await fetch("http://localhost:5001/api/test", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                hello: "world"
+            })
+            });
+
+            const data = await response.json();
+            console.log(data);
+        }
+
+            async function set_time() {
+                try {
+                var start = parseInt(document.getElementById("start_date").value)  
+                var end = parseInt(document.getElementById("end_date").value)
+
+                console.log("start:", start, "end:", end)
+
+                    if (isNaN(start) || isNaN(end)) {
+                        alert("Please enter valid years")
+                        return
+                    }
+                    const response = await fetch("http://localhost:5001/api/setDates", {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json"
+                        },
+                        body: JSON.stringify({
+                            start_date: start,
+                            end_date: end
+                        })
+                    });
+                    if (response.status === 200) {
+                        document.getElementById("timeframe").innerHTML = start + " - " + end;
+                    } else {
+                        alert("Years should be between 1990 and present, and end year needs to be at least 5 years LATER than start year")
+                    }
+                    } catch (e) {
+                        alert("Server didn't respond properly, please try again later.")
+                    } 
+                }
+            async function pull_market_data() {
+                const response = await fetch("http://localhost:5001/api/pullData", {
+                    method: "GET",
+                });
+                const data = await response.json(); 
+                console.log(data);
+                // mean goes [bonds, gold, stocks, real estate, internationals]
+                stock_mean = data.means[2];
+                stock_std = data.stds[2];
+                bond_mean = data.means[0];
+                bond_std = data.stds[0];
+                gold_mean = data.means[1];
+                gold_std = data.stds[1];
+                i_mean = data.means[4];
+                i_std = data.means[4];
+                r_mean = data.means[3];
+                r_std = data.means[3];
+                Cov = data.corr
+            }
             function createHistogram(data, bins = 20, ReturnsLogged) {
                 let min = Math.min(...data);
                 let max = Math.max(...data);
@@ -259,18 +404,9 @@
 
             // a single iteration in a single monte carlo
             function monte_carlo_single(time, stock_percent, bond_percent, gold_percent, i_percent, r_percent, principle, RFR, real_or_nominal, crn_mode, crn_universe_id = 0) {
-                                    // --- STOCKS (log-normal model) ---
+
+                // --- STOCKS (log-normal model) ---
                 //var portfolioFactor = stock_percent * (e ** (randomNormal(0.07 - 0.5 * 0.15 * 0.15, 0.15))) + bond_percent * (e ** Math.log(1.04));
-                let stock_mean = 0.07 - (0.5 * 0.15 * 0.15)
-                let stock_std = 0.15
-                let bond_mean = 0.04 - (0.5 * 0.05 * 0.05)
-                let bond_std = 0.05
-                let gold_mean = 0.042 - (0.5 * 0.17 * 0.17)
-                let gold_std = 0.17
-                let i_mean = 0.058 - (0.5 * 0.17 * 0.17)
-                let i_std = 0.17
-                let r_mean = 0.074 - (0.5 * 0.2 * 0.2)
-                let r_std = 0.2
                 var inflation = 0.02;
 
                 var stock_percent = stock_percent / 100
@@ -279,14 +415,7 @@
                 var i_percent = i_percent / 100
                 var r_percent = r_percent / 100
 
-                const Cov = [
-                //  SPY    Bond   Gold   Intl   REIT
-                [ 1.00, -0.20,  0.05,  0.72,  0.62],  // SPY
-                [-0.20,  1.00,  0.15, -0.10,  0.15],  // Bond
-                [ 0.05,  0.15,  1.00,  0.05,  0.05],  // Gold
-                [ 0.72, -0.10,  0.05,  1.00,  0.55],  // Intl
-                [ 0.62,  0.15,  0.05,  0.55,  1.00]   // REIT
-                ];
+
                 var L = cholesky(Cov) //L*Lt = Cov
                 var z_raw = [
                     seeded_random(crn_mode, crn_universe_id, 0, i),
